@@ -1,0 +1,48 @@
+INSERT INTO scan_daily_analytics (
+    "qrCodeId", "date", "totalScans", "uniqueScans",
+    "deviceCounts", "browserCounts", "osCounts",
+    "countryCounts", "cityCounts"
+)
+VALUES (
+    p_qr_code_id,
+    p_date,
+    1,
+    CASE 
+        WHEN NOT EXISTS (
+            SELECT 1 
+            FROM scans 
+            WHERE "qrCodeId" = p_qr_code_id 
+              AND ip = p_ip 
+              AND "scannedAt"::date = p_date
+        ) THEN 1 ELSE 0 
+    END,
+    -- Initialize JSON with first value if present
+    CASE WHEN p_device IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(p_device, 1) END,
+    CASE WHEN p_browser IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(p_browser, 1) END,
+    CASE WHEN p_os IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(p_os, 1) END,
+    CASE WHEN p_country IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(p_country, 1) END,
+    CASE WHEN p_city IS NULL THEN '{}'::jsonb ELSE jsonb_build_object(p_city, 1) END
+)
+ON CONFLICT ("qrCodeId", "date")
+DO UPDATE SET
+    "totalScans" = scan_daily_analytics."totalScans" + 1,
+    "uniqueScans" = scan_daily_analytics."uniqueScans" +
+        CASE 
+            WHEN NOT EXISTS (
+                SELECT 1 
+                FROM scans
+                WHERE "qrCodeId" = p_qr_code_id 
+                  AND ip = p_ip 
+                  AND "scannedAt"::date = p_date
+            ) THEN 1 ELSE 0 
+        END,
+    "deviceCounts" = CASE 
+        WHEN p_device IS NULL THEN scan_daily_analytics."deviceCounts"
+        ELSE jsonb_set(
+            scan_daily_analytics."deviceCounts",
+            ARRAY[p_device],
+            to_jsonb(COALESCE((scan_daily_analytics."deviceCounts"->>p_device)::int, 0) + 1),
+            true
+        )
+    END,
+    -- repeat for browser, os, country, city
