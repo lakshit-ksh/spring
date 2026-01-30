@@ -1,6 +1,9 @@
+-- Remove the old version since parameters are changing
+DROP FUNCTION IF EXISTS log_scan(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT);
+
 CREATE OR REPLACE FUNCTION log_scan(
     p_qr_code_id UUID,
-    p_ip TEXT,
+    p_ua_ip_hash TEXT,
     p_country TEXT,
     p_city TEXT,
     p_browser TEXT,
@@ -11,7 +14,7 @@ RETURNS VOID AS $$
 BEGIN
     INSERT INTO scans(
         qr_code_id,
-        ip,
+        ua_ip_hash,    -- Target column in your scan table
         country,
         city,
         scanned_at,
@@ -21,7 +24,7 @@ BEGIN
     )
     VALUES (
         p_qr_code_id,
-        p_ip,
+        p_ua_ip_hash,
         p_country,
         p_city,
         NOW(),
