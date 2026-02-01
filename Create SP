@@ -1,169 +1,86 @@
--- Remove the old version since parameters are changing
-DROP FUNCTION IF EXISTS log_scan(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT);
-
-CREATE OR REPLACE FUNCTION log_scan(
-    p_qr_code_id UUID,
-    p_ua_ip_hash TEXT,
-    p_country TEXT,
-    p_city TEXT,
-    p_browser TEXT,
-    p_device_type TEXT,
-    p_os TEXT
-)
-RETURNS VOID AS $$
-BEGIN
-    INSERT INTO scans(
-        qr_code_id,
-        ua_ip_hash,    -- Target column in your scan table
-        country,
-        city,
-        scanned_at,
-        browser,
-        device_type,
-        os
-    )
-    VALUES (
-        p_qr_code_id,
-        p_ua_ip_hash,
-        p_country,
-        p_city,
-        NOW(),
-        p_browser,
-        p_device_type,
-        p_os
-    );
-END;
-$$ LANGUAGE plpgsql;
-
-
-============
-
-
-CREATE OR REPLACE FUNCTION upsert_scan_daily_analytics(
-    p_qr_code_id UUID,
-    p_date DATE,
-    p_ip TEXT DEFAULT NULL,
-    p_device_type TEXT DEFAULT NULL,
-    p_browser TEXT DEFAULT NULL,
-    p_os TEXT DEFAULT NULL,
-    p_country TEXT DEFAULT NULL,
-    p_city TEXT DEFAULT NULL
-)
-RETURNS VOID AS $$
+CREATE OR REPLACE PROCEDURE aggregate_scans_into_analytics()
+LANGUAGE plpgsql
+AS $$
 DECLARE
-    v_analytics scan_daily_analytics%ROWTYPE;
-    v_is_unique INT;
+    scan_record RECORD;
+    analytics_record RECORD;
 BEGIN
-    -- Determine if this scan is unique for the day (based on IP)
-    IF p_ip IS NOT NULL THEN
-        SELECT COUNT(*) INTO v_is_unique
-        FROM scans
-        WHERE "qrCodeId" = p_qr_code_id
-          AND "scannedAt"::date = p_date
-          AND ip = p_ip;
-    ELSE
-        v_is_unique := 0;
-    END IF;
+    -- Loop through each scan record
+    FOR scan_record IN SELECT * FROM "scans" WHERE NOT aggregated LOOP
+        -- Check if there's an existing analytics record for the qrCodeId and date
+        SELECT * INTO analytics_record
+        FROM "scan_daily_analytics"
+        WHERE "qrCodeId" = scan_record."qrCodeId"
+        AND date_trunc('day', scan_record."scannedAt") = date_trunc('day', scan_record."scannedAt");
 
-    -- Check if analytics row exists
-    SELECT * INTO v_analytics
-    FROM scan_daily_analytics
-    WHERE "qrCodeId" = p_qr_code_id
-      AND date = p_date
-    LIMIT 1;
+        -- If no record exists, create a new one
+        IF NOT FOUND THEN
+            INSERT INTO "scan_daily_analytics" (
+                "qrCodeId",
+                "date",
+                "totalScans",
+                "uniqueScans",
+                "deviceCounts",
+                "browserCounts",
+                "osCounts",
+                "countryCounts",
+                "cityCounts"
+            )
+            VALUES (
+                scan_record."qrCodeId",
+                date_trunc('day', scan_record."scannedAt"),
+                1,
+                1,
+                jsonb_build_object(scan_record."deviceType", 1),
+                jsonb_build_object(scan_record."browser", 1),
+                jsonb_build_object(scan_record."os", 1),
+                jsonb_build_object(scan_record."country", 1),
+                jsonb_build_object(scan_record."city", 1)
+            );
+        ELSE
+            -- If a record exists, update it
+            UPDATE "scan_daily_analytics"
+            SET
+                "totalScans" = analytics_record."totalScans" + 1,
+                "uniqueScans" = analytics_record."uniqueScans" + 1,
+                "deviceCounts" = jsonb_set(
+                    COALESCE(analytics_record."deviceCounts", '{}'::jsonb),
+                    ARRAY[scan_record."deviceType"],
+                    (COALESCE((analytics_record."deviceCounts"->>scan_record."deviceType")::int, 0) + 1)::text::jsonb,
+                    true
+                ),
+                "browserCounts" = jsonb_set(
+                    COALESCE(analytics_record."browserCounts", '{}'::jsonb),
+                    ARRAY[scan_record."browser"],
+                    (COALESCE((analytics_record."browserCounts"->>scan_record."browser")::int, 0) + 1)::text::jsonb,
+                    true
+                ),
+                "osCounts" = jsonb_set(
+                    COALESCE(analytics_record."osCounts", '{}'::jsonb),
+                    ARRAY[scan_record."os"],
+                    (COALESCE((analytics_record."osCounts"->>scan_record."os")::int, 0) + 1)::text::jsonb,
+                    true
+                ),
+                "countryCounts" = jsonb_set(
+                    COALESCE(analytics_record."countryCounts", '{}'::jsonb),
+                    ARRAY[scan_record."country"],
+                    (COALESCE((analytics_record."countryCounts"->>scan_record."country")::int, 0) + 1)::text::jsonb,
+                    true
+                ),
+                "cityCounts" = jsonb_set(
+                    COALESCE(analytics_record."cityCounts", '{}'::jsonb),
+                    ARRAY[scan_record."city"],
+                    (COALESCE((analytics_record."cityCounts"->>scan_record."city")::int, 0) + 1)::text::jsonb,
+                    true
+                )
+            WHERE "qrCodeId" = scan_record."qrCodeId"
+            AND date = date_trunc('day', scan_record."scannedAt");
+        END IF;
 
-    IF v_analytics IS NULL THEN
-        -- Insert new analytics row
-        INSERT INTO scan_daily_analytics(
-            "qrCodeId",
-            date,
-            "totalScans",
-            "uniqueScans",
-            "deviceCounts",
-            "browserCounts",
-            "osCounts",
-            "countryCounts",
-            "cityCounts",
-            "createdAt"
-        )
-        VALUES (
-            p_qr_code_id,
-            p_date,
-            1,
-            CASE WHEN v_is_unique = 0 THEN 1 ELSE 0 END,
-            COALESCE(jsonb_build_object(p_device_type, 1), '{}'),
-            COALESCE(jsonb_build_object(p_browser, 1), '{}'),
-            COALESCE(jsonb_build_object(p_os, 1), '{}'),
-            COALESCE(jsonb_build_object(p_country, 1), '{}'),
-            COALESCE(jsonb_build_object(p_city, 1), '{}'),
-            NOW()
-        );
-    ELSE
-        -- Update existing analytics row
-        UPDATE scan_daily_analytics
-        SET
-            "totalScans" = "totalScans" + 1,
-            "uniqueScans" = "uniqueScans" + CASE WHEN v_is_unique = 0 THEN 1 ELSE 0 END,
-            "deviceCounts" = COALESCE("deviceCounts", '{}'::jsonb) || 
-                             CASE WHEN p_device_type IS NOT NULL THEN 
-                                jsonb_build_object(p_device_type, COALESCE(("deviceCounts" ->> p_device_type)::int, 0) + 1) 
-                             ELSE '{}'::jsonb END,
-            "browserCounts" = COALESCE("browserCounts", '{}'::jsonb) || 
-                              CASE WHEN p_browser IS NOT NULL THEN 
-                                jsonb_build_object(p_browser, COALESCE(("browserCounts" ->> p_browser)::int, 0) + 1) 
-                              ELSE '{}'::jsonb END,
-            "osCounts" = COALESCE("osCounts", '{}'::jsonb) || 
-                         CASE WHEN p_os IS NOT NULL THEN 
-                            jsonb_build_object(p_os, COALESCE(("osCounts" ->> p_os)::int, 0) + 1) 
-                         ELSE '{}'::jsonb END,
-            "countryCounts" = COALESCE("countryCounts", '{}'::jsonb) || 
-                              CASE WHEN p_country IS NOT NULL THEN 
-                                jsonb_build_object(p_country, COALESCE(("countryCounts" ->> p_country)::int, 0) + 1) 
-                              ELSE '{}'::jsonb END,
-            "cityCounts" = COALESCE("cityCounts", '{}'::jsonb) || 
-                           CASE WHEN p_city IS NOT NULL THEN 
-                            jsonb_build_object(p_city, COALESCE(("cityCounts" ->> p_city)::int, 0) + 1) 
-                           ELSE '{}'::jsonb END
-        WHERE id = v_analytics.id;
-    END IF;
+        -- Mark the scan as aggregated
+        UPDATE "scans"
+        SET aggregated = TRUE
+        WHERE id = scan_record.id;
+    END LOOP;
 END;
-$$ LANGUAGE plpgsql;
-
-
-===================
-
-CREATE OR REPLACE FUNCTION get_jsonb_analytics(
-    p_qrCodeId UUID,
-    p_field TEXT,
-    p_from DATE,
-    p_to DATE
-)
-RETURNS JSONB AS $$
-BEGIN
-    RETURN (
-        SELECT jsonb_object_agg(key, total_count)
-        FROM (
-            SELECT key, SUM(value::int) AS total_count
-            FROM scan_daily_analytics,
-                 jsonb_each(
-                     CASE p_field
-                         WHEN 'deviceCounts' THEN COALESCE("deviceCounts", '{}'::jsonb)
-                         WHEN 'browserCounts' THEN COALESCE("browserCounts", '{}'::jsonb)
-                         WHEN 'osCounts' THEN COALESCE("osCounts", '{}'::jsonb)
-                         WHEN 'countryCounts' THEN COALESCE("countryCounts", '{}'::jsonb)
-                         WHEN 'cityCounts' THEN COALESCE("cityCounts", '{}'::jsonb)
-                         ELSE '{}'::jsonb
-                     END
-                 )
-            WHERE "qrCodeId" = p_qrCodeId
-              AND date >= p_from
-              AND date <= p_to
-            GROUP BY key
-        ) AS sub
-    );
-END;
-$$ LANGUAGE plpgsql;
-
-
-===================
-
+$$;
